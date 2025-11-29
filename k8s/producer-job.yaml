@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: producer-job
+spec:
+  template:
+    spec:
+      containers:
+      - name: producer
+        image: producer:latest
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: dataset-volume
+          mountPath: /app/dataset
+      restartPolicy: OnFailure
+      volumes:
+      - name: dataset-volume
+        hostPath:
+          path: /run/desktop/mnt/host/c/Users/sserh/OneDrive/Masaüstü/Homework/dataset
+          type: Directory

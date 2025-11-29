@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-job
+spec:
+  template:
+    spec:
+      serviceAccountName: spark
+      containers:
+        - name: spark-submit
+          image: spark-app:latest
+          imagePullPolicy: Never
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "1536Mi"
+              cpu: "1000m"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          command:
+            - /opt/spark/bin/spark-submit
+            - --master
+            - k8s://https://kubernetes.default.svc.cluster.local:443
+            - --deploy-mode
+            - client
+            - --conf
+            - spark.driver.host=$(POD_IP)
+            - --conf
+            - spark.driver.bindAddress=$(POD_IP)
+            - --conf
+            - spark.kubernetes.container.image=spark-app:latest
+            - --conf
+            - spark.kubernetes.container.image.pullPolicy=Never
+            - --conf
+            - spark.kubernetes.authenticate.driver.serviceAccountName=spark
+            - --conf
+            - spark.kubernetes.executor.volumes.hostPath.dataset-volume.mount.path=/app/dataset
+            - --conf
+            - spark.kubernetes.executor.volumes.hostPath.dataset-volume.options.path=/run/desktop/mnt/host/c/Users/sserh/OneDrive/Masaüstü/Homework/dataset
+            - --conf
+            - spark.executor.memory=1g
+            - --conf
+            - spark.driver.memory=1g
+            - --packages
+            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.mongodb.spark:mongo-spark-connector_2.12:10.2.1
+            - /app/spark_processor.py
+          volumeMounts:
+            - name: dataset-volume
+              mountPath: /app/dataset
+      restartPolicy: OnFailure
+      volumes:
+        - name: dataset-volume
+          hostPath:
+            path: /run/desktop/mnt/host/c/Users/sserh/OneDrive/Masaüstü/Homework/dataset
+            type: Directory
