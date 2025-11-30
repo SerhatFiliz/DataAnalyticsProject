@@ -1,35 +1,35 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, struct, to_json
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, FloatType
+from pyspark.sql.functions import from_json, col, rand
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, FloatType
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder
 from pyspark.ml.regression import RandomForestRegressor
-from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.clustering import KMeans
 import logging
 
-# Configure Logging
+# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration
+# --- CONFIGURATION ---
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
 KAFKA_TOPIC = "store-sales"
 MONGO_URI = "mongodb://mongodb:27017/sales_db.predictions"
 DATA_FILE = "/app/dataset/train.csv"
 
 def main():
+    # 1. INITIALIZATION
     spark = SparkSession.builder \
-        .appName("StoreSalesForecasting") \
+        .appName("HybridSalesForecastingSystem") \
         .config("spark.mongodb.write.connection.uri", MONGO_URI) \
         .config("spark.mongodb.read.connection.uri", MONGO_URI) \
         .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
 
-    # Define Schema for Store Sales Data
-    # id,date,store_nbr,family,sales,onpromotion
+    # 2. SCHEMA DEFINITION
     schema = StructType([
-        StructField("id", StringType(), True), # ID might be int in CSV but string in JSON safe
+        StructField("id", StringType(), True),
         StructField("date", StringType(), True),
         StructField("store_nbr", IntegerType(), True),
         StructField("family", StringType(), True),
@@ -37,35 +37,86 @@ def main():
         StructField("onpromotion", IntegerType(), True)
     ])
 
-    # --- 1. Train Model on Static Data (Startup) ---
-    logger.info("Loading training data from %s...", DATA_FILE)
+    # ---------------------------------------------------------
+    # PHASE 1: MODEL TRAINING (Offline Learning)
+    # ---------------------------------------------------------
+    logger.info("Loading training data...")
+    
     try:
-        # Load a subset for quick training
-        df_train = spark.read.csv(DATA_FILE, header=True, schema=schema).limit(10000)
+        # Load dataset
+        df_raw = spark.read.csv(DATA_FILE, header=True, schema=schema)
         
-        # Fill NA
-        df_train = df_train.na.fill(0)
+        # --- CRITICAL STEP 1: DATA FILTERING ---
+        # Remove zero sales to avoid skewing the cluster means towards zero.
+        df_filtered = df_raw.filter("sales > 0")
 
-        # Feature Engineering Pipeline
-        indexer = StringIndexer(inputCol="family", outputCol="family_index", handleInvalid="keep")
-        encoder = OneHotEncoder(inputCols=["family_index"], outputCols=["family_vec"])
-        assembler = VectorAssembler(inputCols=["store_nbr", "onpromotion", "family_vec"], outputCol="features")
-        rf = RandomForestRegressor(featuresCol="features", labelCol="sales", numTrees=10)
+        # --- CRITICAL STEP 2: RANDOMIZATION ---
+        # We MUST shuffle the data before limiting.
+        # Otherwise, we only train on the first dates/stores (sorted data),
+        # which might only contain Low Volume sales.
+        # .orderBy(rand()) forces a shuffle.
+        df_train = df_filtered.orderBy(rand()).limit(50000)
+        
+        # Verify we have data
+        count = df_train.count()
+        if count == 0:
+            raise Exception("No data found after filtering sales > 0")
 
-        pipeline = Pipeline(stages=[indexer, encoder, assembler, rf])
+        logger.info(f"Training on {count} RANDOMIZED valid records...")
 
-        logger.info("Training RandomForest Model...")
+        # --- STEP A: FEATURE ENGINEERING ---
+        
+        # 1. Product Family Encoding
+        indexer_family = StringIndexer(inputCol="family", outputCol="family_idx", handleInvalid="keep")
+        encoder_family = OneHotEncoder(inputCols=["family_idx"], outputCols=["family_vec"])
+        
+        # 2. Store Number Encoding 
+        indexer_store = StringIndexer(inputCol="store_nbr", outputCol="store_idx", handleInvalid="keep")
+        encoder_store = OneHotEncoder(inputCols=["store_idx"], outputCols=["store_vec"])
+        
+        # --- STEP B: CLUSTERING (Unsupervised) ---
+        # Use Context (Store, Family, Promotion) to find Volume Tiers.
+        # Sales is NOT used as input here, to prevent data leakage during prediction.
+        
+        assembler_clustering = VectorAssembler(
+            inputCols=["store_vec", "family_vec", "onpromotion"], 
+            outputCol="features_for_clustering"
+        )
+        
+        # K-Means: Find 3 clusters (Low, Medium, High Volume contexts)
+        kmeans = KMeans(featuresCol="features_for_clustering", predictionCol="cluster_id", k=3, seed=42)
+
+        # --- STEP C: REGRESSION (Supervised) ---
+        # Predict Sales using features + the cluster context
+        
+        assembler_final = VectorAssembler(
+            inputCols=["store_vec", "family_vec", "onpromotion", "cluster_id"], 
+            outputCol="features_final"
+        )
+        
+        rf = RandomForestRegressor(featuresCol="features_final", labelCol="sales", numTrees=15)
+
+        # --- PIPELINE ---
+        pipeline = Pipeline(stages=[
+            indexer_family, encoder_family,
+            indexer_store, encoder_store,
+            assembler_clustering, kmeans, 
+            assembler_final, rf
+        ])
+
+        logger.info("Training Optimized Hybrid Model...")
         model = pipeline.fit(df_train)
-        logger.info("Model training completed.")
+        logger.info("Training Completed.")
 
     except Exception as e:
-        logger.error("Failed to train model: %s", e)
+        logger.error("Training Error: %s", e)
         return
 
-    # --- 2. Stream Processing ---
-    logger.info("Starting Stream Processing from Kafka...")
+    # ---------------------------------------------------------
+    # PHASE 2: REAL-TIME STREAMING
+    # ---------------------------------------------------------
+    logger.info("Starting Streaming Phase...")
 
-    # Read from Kafka
     df_stream = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
@@ -75,24 +126,22 @@ def main():
 
     # Parse JSON
     df_parsed = df_stream.select(from_json(col("value").cast("string"), schema).alias("data")).select("data.*")
-    
-    # Fill NA for stream
     df_parsed = df_parsed.na.fill(0)
 
-    # Apply Model
+    # Transform (Predict)
     predictions = model.transform(df_parsed)
 
-    # Select output columns
+    # Output
     output_df = predictions.select(
         col("id"),
         col("store_nbr"),
         col("family"),
         col("onpromotion"),
-        col("prediction").alias("predicted_sales")
+        col("cluster_id"),                 
+        col("sales").alias("actual_sales"),          
+        col("prediction").alias("predicted_sales")   
     )
 
-    # Write to MongoDB
-    # Write to MongoDB using foreachBatch
     def write_to_mongo(df, epoch_id):
         df.write \
             .format("mongodb") \

@@ -1,1 +1,15 @@
-dataset/
+# Python gereksiz dosyaları
+__pycache__/
+*.pyc
+
+# Dataset (Büyük dosyalar GitHub'a gitmesin)
+dataset/*.csv
+*.csv
+
+# Editör ayarları
+.vscode/
+.idea/
+
+# İşletim sistemi çöpleri
+.DS_Store
+Thumbs.db
