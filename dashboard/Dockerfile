@@ -2,10 +2,13 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# 1. ÖNCE SİSTEM KÜTÜPHANESİNİ YÜKLE (Bu olmazsa grafik çizilmez hata verir)
+RUN apt-get update && apt-get install -y graphviz
+
 COPY app.py .
 
-# BURAYA scikit-learn EKLENDİ
-RUN pip install streamlit pymongo pandas plotly scikit-learn
+# 2. SONRA PYTHON KÜTÜPHANELERİNİ YÜKLE (graphviz'i buraya ekledik)
+RUN pip install streamlit pymongo pandas plotly scikit-learn graphviz
 
 EXPOSE 8501
 
