@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY app.py .
 
-RUN pip install streamlit pymongo pandas plotly
+# BURAYA scikit-learn EKLENDİ
+RUN pip install streamlit pymongo pandas plotly scikit-learn
 
 EXPOSE 8501
 
