@@ -19,17 +19,17 @@ DATA_FILE = "/app/dataset/train.csv"
 
 def main():
     # 1. INITIALIZATION
-    # Initialize Spark Session with MongoDB connector
+    # Spark Session başlatılıyor. (Yorum satırını zincirin dışına aldım)
     spark = SparkSession.builder \
         .appName("HybridSalesForecastingSystem") \
         .config("spark.mongodb.write.connection.uri", MONGO_URI) \
         .config("spark.mongodb.read.connection.uri", MONGO_URI) \
+        .config("spark.sql.shuffle.partitions", "10") \
         .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
 
     # 2. SCHEMA DEFINITION
-    # Define the structure of our incoming CSV and Kafka JSON data
     schema = StructType([
         StructField("id", StringType(), True),
         StructField("date", StringType(), True),
@@ -40,70 +40,58 @@ def main():
     ])
 
     # ---------------------------------------------------------
-    # PHASE 1: MODEL TRAINING (Offline Learning)
+    # PHASE 1: MODEL TRAINING (Offline Learning with BIG DATA)
     # ---------------------------------------------------------
-    logger.info("Loading training data...")
+    logger.info("Loading full training dataset...")
     
     try:
-        # Load dataset from CSV
+        # Load the raw CSV file
         df_raw = spark.read.csv(DATA_FILE, header=True, schema=schema)
         
-        # --- CRITICAL STEP 1: DATA CLEANING & FILTERING ---
-        # We assume that '0' sales represent closed days or stockouts.
-        # Removing them ensures the model learns from active sales days only.
+        # --- DATA FILTERING ---
         df_filtered = df_raw.filter("sales > 0")
 
-        # --- CRITICAL STEP 2: RANDOMIZATION & SAMPLING ---
-        # Increased training size to 20,000 for better cluster stability and regression accuracy.
-        # .orderBy(rand()) ensures we get a random sample, not just the first dates.
-        TRAINING_SIZE = 20000 
+        # --- DATA SAMPLING (300,000) ---
+        TRAINING_SIZE = 300000 
+        logger.info(f"Sampling {TRAINING_SIZE} records for robust training...")
+        
+        # Shuffle and Limit
         df_train = df_filtered.orderBy(rand()).limit(TRAINING_SIZE)
         
-        # Verify data availability
-        count = df_train.count()
-        if count == 0:
-            raise Exception("No data found after filtering sales > 0")
+        # Cache for performance
+        df_train.cache()
 
-        logger.info(f"Training on {count} RANDOMIZED valid records...")
+        logger.info(f"Training set prepared with {df_train.count()} records.")
 
         # --- STEP A: FEATURE ENGINEERING ---
         
-        # 1. Product Family Encoding (Categorical -> Numerical Vector)
+        # 1. Encode 'family'
         indexer_family = StringIndexer(inputCol="family", outputCol="family_idx", handleInvalid="keep")
         encoder_family = OneHotEncoder(inputCols=["family_idx"], outputCols=["family_vec"])
         
-        # 2. Store Number Encoding (Location Context)
+        # 2. Encode 'store_nbr'
         indexer_store = StringIndexer(inputCol="store_nbr", outputCol="store_idx", handleInvalid="keep")
         encoder_store = OneHotEncoder(inputCols=["store_idx"], outputCols=["store_vec"])
         
-        # --- STEP B: UNSUPERVISED LEARNING (Clustering) ---
-        # GOAL: Segment stores based on volume context (Store Type + Product + Promotion).
-        # NOTE: Sales are NOT used here to prevent leakage.
-        
+        # --- STEP B: UNSUPERVISED LEARNING (CLUSTERING) ---
         assembler_clustering = VectorAssembler(
             inputCols=["store_vec", "family_vec", "onpromotion"], 
             outputCol="features_for_clustering"
         )
         
-        # K-Means Algorithm
-        # k=3: To find Low, Medium, and High volume segments.
+        # K-Means: k=3
         kmeans = KMeans(featuresCol="features_for_clustering", predictionCol="cluster_id", k=3, seed=42)
 
-        # --- STEP C: SUPERVISED LEARNING (Regression) ---
-        # GOAL: Predict exact sales units.
-        # Input: All encoded features PLUS the Cluster ID found in Step B.
-        
+        # --- STEP C: SUPERVISED LEARNING (REGRESSION) ---
         assembler_final = VectorAssembler(
             inputCols=["store_vec", "family_vec", "onpromotion", "cluster_id"], 
             outputCol="features_final"
         )
         
         # Random Forest Regressor
-        # numTrees=20: Balanced for speed and accuracy in streaming context.
-        rf = RandomForestRegressor(featuresCol="features_final", labelCol="sales", numTrees=20)
+        rf = RandomForestRegressor(featuresCol="features_final", labelCol="sales", numTrees=25, maxDepth=10)
 
-        # --- PIPELINE CONSTRUCTION ---
-        # Defines the exact sequence of data transformation and training.
+        # --- PIPELINE ---
         pipeline = Pipeline(stages=[
             indexer_family, encoder_family,
             indexer_store, encoder_store,
@@ -111,20 +99,22 @@ def main():
             assembler_final, rf
         ])
 
-        logger.info("Training Optimized Hybrid Model...")
+        logger.info("Starting Hybrid Model Training (This might take 1-2 minutes)...")
         model = pipeline.fit(df_train)
         logger.info("Training Completed Successfully.")
+        
+        # Clear memory
+        df_train.unpersist()
 
     except Exception as e:
-        logger.error("Training Error: %s", e)
+        logger.error("Critical Training Error: %s", e)
         return
 
     # ---------------------------------------------------------
     # PHASE 2: REAL-TIME STREAMING
     # ---------------------------------------------------------
-    logger.info("Starting Streaming Phase...")
+    logger.info("Initializing Kafka Stream...")
 
-    # Read from Kafka
     df_stream = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
@@ -132,19 +122,14 @@ def main():
         .option("startingOffsets", "latest") \
         .load()
 
-    # Parse JSON Payload
+    # Parse Payload
     df_parsed = df_stream.select(from_json(col("value").cast("string"), schema).alias("data")).select("data.*")
-    
-    # Handle Nulls for streaming stability
     df_parsed = df_parsed.na.fill(0)
 
-    # Apply the Trained Pipeline Model
-    # 1. Transforms features
-    # 2. Assigns Cluster ID
-    # 3. Predicts Sales
+    # Inference (Prediction)
     predictions = model.transform(df_parsed)
 
-    # Select Output Columns
+    # Select Output
     output_df = predictions.select(
         col("id"),
         col("store_nbr"),
@@ -155,7 +140,7 @@ def main():
         col("prediction").alias("predicted_sales")   
     )
 
-    # Writer Function for MongoDB
+    # MongoDB Sink
     def write_to_mongo(df, epoch_id):
         df.write \
             .format("mongodb") \
@@ -163,7 +148,6 @@ def main():
             .option("spark.mongodb.write.connection.uri", MONGO_URI) \
             .save()
 
-    # Start Streaming Query
     query = output_df.writeStream \
         .outputMode("append") \
         .foreachBatch(write_to_mongo) \
