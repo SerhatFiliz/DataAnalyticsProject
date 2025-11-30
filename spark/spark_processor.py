@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, rand
+from pyspark.sql.functions import from_json, col, rand, month, dayofweek, to_date
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, FloatType
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder
@@ -7,19 +7,21 @@ from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.clustering import KMeans
 import logging
 
-# --- LOGGING SETUP ---
+# --- 1. LOGGING SETUP ---
+# Helps us track the training progress in Kubernetes logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATION ---
+# --- 2. CONFIGURATION ---
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
 KAFKA_TOPIC = "store-sales"
+# MongoDB connection URI (Service name: mongodb, Port: 27017, DB: sales_db, Coll: predictions)
 MONGO_URI = "mongodb://mongodb:27017/sales_db.predictions"
 DATA_FILE = "/app/dataset/train.csv"
 
 def main():
-    # 1. INITIALIZATION
-    # Spark Session başlatılıyor. (Yorum satırını zincirin dışına aldım)
+    # --- 3. INITIALIZATION ---
+    # Create Spark Session with MongoDB Connector support
     spark = SparkSession.builder \
         .appName("HybridSalesForecastingSystem") \
         .config("spark.mongodb.write.connection.uri", MONGO_URI) \
@@ -27,9 +29,11 @@ def main():
         .config("spark.sql.shuffle.partitions", "10") \
         .getOrCreate()
 
+    # Reduce log verbosity to avoid clutter
     spark.sparkContext.setLogLevel("WARN")
 
-    # 2. SCHEMA DEFINITION
+    # --- 4. SCHEMA DEFINITION ---
+    # Define the strict schema for input data (CSV & JSON)
     schema = StructType([
         StructField("id", StringType(), True),
         StructField("date", StringType(), True),
@@ -39,59 +43,75 @@ def main():
         StructField("onpromotion", IntegerType(), True)
     ])
 
+    # --- HELPER: FEATURE ENGINEERING (DATE) ---
+    # Extracts useful features from the raw date string.
+    # Used in both Training and Streaming phases.
+    def add_date_features(df):
+        # 1. Convert string to DateType
+        df = df.withColumn("parsed_date", to_date(col("date"), "yyyy-MM-dd"))
+        # 2. Extract Month (1-12) -> Captures Seasonality
+        df = df.withColumn("month", month(col("parsed_date")))
+        # 3. Extract Day of Week (1=Mon, 7=Sun) -> Captures Weekly Cycles
+        df = df.withColumn("day_of_week", dayofweek(col("parsed_date")))
+        # 4. Fill nulls to prevent errors
+        return df.fillna(0)
+
     # ---------------------------------------------------------
-    # PHASE 1: MODEL TRAINING (Offline Learning with BIG DATA)
+    # PHASE 1: MODEL TRAINING (Offline Learning)
     # ---------------------------------------------------------
     logger.info("Loading full training dataset...")
     
     try:
-        # Load the raw CSV file
+        # Load raw data from CSV
         df_raw = spark.read.csv(DATA_FILE, header=True, schema=schema)
         
-        # --- DATA FILTERING ---
+        # Filter: Train only on active sales days (Avoids learning '0' for everything)
         df_filtered = df_raw.filter("sales > 0")
+        
+        # Enrich: Add Date Features
+        df_enhanced = add_date_features(df_filtered)
 
-        # --- DATA SAMPLING (300,000) ---
+        # Sampling: Use 300,000 records for robust 'Big Data' training
+        # .orderBy(rand()) ensures a random distribution from the entire file
         TRAINING_SIZE = 300000 
         logger.info(f"Sampling {TRAINING_SIZE} records for robust training...")
         
-        # Shuffle and Limit
-        df_train = df_filtered.orderBy(rand()).limit(TRAINING_SIZE)
+        df_train = df_enhanced.orderBy(rand()).limit(TRAINING_SIZE)
         
-        # Cache for performance
+        # Cache data in memory for faster iteration
         df_train.cache()
 
         logger.info(f"Training set prepared with {df_train.count()} records.")
 
-        # --- STEP A: FEATURE ENGINEERING ---
-        
-        # 1. Encode 'family'
+        # --- STEP A: PREPROCESSING (Encoders) ---
+        # Convert Categorical strings to Numerical indices/vectors
         indexer_family = StringIndexer(inputCol="family", outputCol="family_idx", handleInvalid="keep")
         encoder_family = OneHotEncoder(inputCols=["family_idx"], outputCols=["family_vec"])
         
-        # 2. Encode 'store_nbr'
         indexer_store = StringIndexer(inputCol="store_nbr", outputCol="store_idx", handleInvalid="keep")
         encoder_store = OneHotEncoder(inputCols=["store_idx"], outputCols=["store_vec"])
         
-        # --- STEP B: UNSUPERVISED LEARNING (CLUSTERING) ---
+        # --- STEP B: CLUSTERING (K-Means) ---
+        # Goal: Segment data based on context (Store + Product + Time + Promo)
+        # We do NOT use 'sales' here to prevent data leakage.
         assembler_clustering = VectorAssembler(
-            inputCols=["store_vec", "family_vec", "onpromotion"], 
+            inputCols=["store_vec", "family_vec", "onpromotion", "month", "day_of_week"], 
             outputCol="features_for_clustering"
         )
         
-        # K-Means: k=3
         kmeans = KMeans(featuresCol="features_for_clustering", predictionCol="cluster_id", k=3, seed=42)
 
-        # --- STEP C: SUPERVISED LEARNING (REGRESSION) ---
+        # --- STEP C: REGRESSION (Random Forest) ---
+        # Goal: Predict Sales using all features + the Cluster ID
         assembler_final = VectorAssembler(
-            inputCols=["store_vec", "family_vec", "onpromotion", "cluster_id"], 
+            inputCols=["store_vec", "family_vec", "onpromotion", "cluster_id", "month", "day_of_week"], 
             outputCol="features_final"
         )
         
-        # Random Forest Regressor
         rf = RandomForestRegressor(featuresCol="features_final", labelCol="sales", numTrees=25, maxDepth=10)
 
         # --- PIPELINE ---
+        # Chaining all steps together
         pipeline = Pipeline(stages=[
             indexer_family, encoder_family,
             indexer_store, encoder_store,
@@ -103,7 +123,7 @@ def main():
         model = pipeline.fit(df_train)
         logger.info("Training Completed Successfully.")
         
-        # Clear memory
+        # Free up memory
         df_train.unpersist()
 
     except Exception as e:
@@ -115,6 +135,7 @@ def main():
     # ---------------------------------------------------------
     logger.info("Initializing Kafka Stream...")
 
+    # Read from Kafka Topic
     df_stream = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
@@ -122,25 +143,29 @@ def main():
         .option("startingOffsets", "latest") \
         .load()
 
-    # Parse Payload
+    # Parse JSON Payload
     df_parsed = df_stream.select(from_json(col("value").cast("string"), schema).alias("data")).select("data.*")
-    df_parsed = df_parsed.na.fill(0)
+    
+    # Enrich Stream with Date Features (Real-time Feature Engineering)
+    df_stream_enhanced = add_date_features(df_parsed)
 
-    # Inference (Prediction)
-    predictions = model.transform(df_parsed)
+    # Make Predictions using the trained model
+    predictions = model.transform(df_stream_enhanced)
 
-    # Select Output
+    # Select Final Output Columns for MongoDB
     output_df = predictions.select(
         col("id"),
         col("store_nbr"),
         col("family"),
         col("onpromotion"),
+        col("month"),          
+        col("day_of_week"),    
         col("cluster_id"),                 
         col("sales").alias("actual_sales"),          
         col("prediction").alias("predicted_sales")   
     )
 
-    # MongoDB Sink
+    # Write Stream to MongoDB
     def write_to_mongo(df, epoch_id):
         df.write \
             .format("mongodb") \
