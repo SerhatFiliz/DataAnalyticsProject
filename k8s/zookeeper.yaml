@@ -6,9 +6,11 @@ metadata:
     app: zookeeper
 spec:
   ports:
+    # Expose the standard Zookeeper client port (2181) for Kafka to connect.
     - port: 2181
       name: client
   selector:
+    # Route network traffic to pods labeled 'app: zookeeper'.
     app: zookeeper
 ---
 apiVersion: apps/v1
@@ -28,9 +30,11 @@ spec:
     spec:
       containers:
         - name: zookeeper
+          # Use a specific Zookeeper version for deployment stability.
           image: zookeeper:3.5
           ports:
             - containerPort: 2181
+          # Define resource constraints for stable operation.
           resources:
             requests:
               memory: "256Mi"

@@ -3,14 +3,18 @@ kind: Job
 metadata:
   name: spark-job
 spec:
+  # Define the job template for the Spark Driver pod.
   template:
     spec:
+      # Use the 'spark' service account for necessary cluster permissions (RBAC).
       serviceAccountName: spark
       containers:
         - name: spark-submit
+          # Use the pre-built Spark application image containing the processing logic.
           image: spark-app:latest
           imagePullPolicy: Never
           resources:
+            # Define resource requests/limits for the Spark Driver.
             requests:
               memory: "1Gi"
               cpu: "500m"
@@ -18,42 +22,55 @@ spec:
               memory: "1536Mi"
               cpu: "1000m"
           env:
+            # Dynamically fetch the pod's internal IP for driver binding.
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
           command:
+            # Start the Spark application using spark-submit.
             - /opt/spark/bin/spark-submit
             - --master
+            # Connect to the Kubernetes API server for resource orchestration.
             - k8s://https://kubernetes.default.svc.cluster.local:443
             - --deploy-mode
             - client
+            # Bind Spark driver to the pod's IP address.
             - --conf
             - spark.driver.host=$(POD_IP)
             - --conf
             - spark.driver.bindAddress=$(POD_IP)
+            # Specify the image and pull policy for the dynamic Spark Executor pods.
             - --conf
             - spark.kubernetes.container.image=spark-app:latest
             - --conf
             - spark.kubernetes.container.image.pullPolicy=Never
+            # Ensure Executors use the same service account as the Driver.
             - --conf
             - spark.kubernetes.authenticate.driver.serviceAccountName=spark
+            # Configure HostPath volume for Executors to access the dataset.
             - --conf
             - spark.kubernetes.executor.volumes.hostPath.dataset-volume.mount.path=/app/dataset
             - --conf
             - spark.kubernetes.executor.volumes.hostPath.dataset-volume.options.path=/run/desktop/mnt/host/c/Users/sserh/OneDrive/Masaüstü/Homework/dataset
+            # Set memory allocation for the Executor and Driver JVMs.
             - --conf
             - spark.executor.memory=1g
             - --conf
             - spark.driver.memory=1g
             - --packages
+            # Include necessary external packages for Kafka connectivity and MongoDB integration.
             - org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.mongodb.spark:mongo-spark-connector_2.12:10.2.1
+            # Specify the main Python script to execute.
             - /app/spark_processor.py
           volumeMounts:
+            # Mount the host volume containing the dataset.
             - name: dataset-volume
               mountPath: /app/dataset
+      # Ensure the Job fails if the Spark application encounters an issue.
       restartPolicy: OnFailure
       volumes:
+        # Define the host volume that contains the necessary input data.
         - name: dataset-volume
           hostPath:
             path: /run/desktop/mnt/host/c/Users/sserh/OneDrive/Masaüstü/Homework/dataset

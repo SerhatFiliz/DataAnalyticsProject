@@ -3,6 +3,7 @@ kind: Deployment
 metadata:
   name: raw-consumer
 spec:
+  # Maintain a single instance of the consumer pod.
   replicas: 1
   selector:
     matchLabels:
@@ -14,8 +15,11 @@ spec:
     spec:
       containers:
       - name: raw-consumer
+        # Use the locally built consumer image to ingest raw data.
         image: raw-consumer:latest
+        # Crucial for using images built locally without a remote registry.
         imagePullPolicy: Never
+        # Define minimal resources as this consumer only reads and writes.
         resources:
           requests:
             memory: "128Mi"

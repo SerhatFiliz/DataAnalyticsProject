@@ -3,12 +3,16 @@ kind: Job
 metadata:
   name: producer-job
 spec:
+  # Define the job template that creates the producer pod.
   template:
     spec:
       containers:
       - name: producer
+        # Use the locally built producer image for streaming data to Kafka.
         image: producer:latest
+        # Crucial for using images built locally without a registry.
         imagePullPolicy: Never
+        # Define resource constraints for stable operation.
         resources:
           requests:
             memory: "512Mi"
@@ -17,11 +21,14 @@ spec:
             memory: "2Gi"  
             cpu: "1000m"
         volumeMounts:
+        # Mount the host volume containing the CSV dataset into the container's /app/dataset path.
         - name: dataset-volume
           mountPath: /app/dataset
+      # Ensure the Job terminates after the producer finishes reading the entire dataset.
       restartPolicy: OnFailure
       volumes:
       - name: dataset-volume
         hostPath:
+          # Define the specific host machine path where the dataset resides.
           path: /run/desktop/mnt/host/c/Users/sserh/OneDrive/Masaüstü/Homework/dataset
           type: Directory

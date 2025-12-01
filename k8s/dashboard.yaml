@@ -3,12 +3,15 @@ kind: Service
 metadata:
   name: dashboard-service
 spec:
+  # Expose the service externally using a static port on the node.
   type: NodePort
   selector:
+    # Route traffic to pods labeled 'app: dashboard'.
     app: dashboard
   ports:
     - port: 8501
       targetPort: 8501
+      # Map the container port to host port 30005 for browser access.
       nodePort: 30005
 ---
 apiVersion: apps/v1
@@ -16,6 +19,7 @@ kind: Deployment
 metadata:
   name: dashboard
 spec:
+  # Maintain a single replica of the dashboard application.
   replicas: 1
   selector:
     matchLabels:
@@ -27,10 +31,13 @@ spec:
     spec:
       containers:
       - name: dashboard
+        # Use the locally built Docker image.
         image: dashboard-app:latest
+        # essential for using local images without a remote registry.
         imagePullPolicy: Never
         ports:
         - containerPort: 8501
+        # Define resource quotas to ensure cluster stability.
         resources:
           requests:
             memory: "256Mi"

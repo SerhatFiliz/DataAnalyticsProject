@@ -4,9 +4,11 @@ metadata:
   name: mongodb-pvc
 spec:
   accessModes:
+    # Allow the volume to be mounted as read-write by a single node.
     - ReadWriteOnce
   resources:
     requests:
+      # Request 1Gi of persistent storage to ensure data survival across restarts.
       storage: 1Gi
 ---
 apiVersion: v1
@@ -17,8 +19,10 @@ metadata:
     app: mongodb
 spec:
   ports:
+  # Expose the standard MongoDB port for internal cluster communication.
   - port: 27017
   selector:
+    # Route traffic to pods labeled 'app: mongodb'.
     app: mongodb
 ---
 apiVersion: apps/v1
@@ -38,13 +42,16 @@ spec:
     spec:
       containers:
       - name: mongodb
+        # Use MongoDB version 4.4 for stability and compatibility.
         image: mongo:4.4
         ports:
         - containerPort: 27017
         volumeMounts:
+        # Mount the persistent volume to the database data directory.
         - name: mongo-storage
           mountPath: /data/db
         resources:
+          # Define resource requests and limits for predictable performance.
           requests:
             memory: "512Mi"
             cpu: "250m"
@@ -52,6 +59,7 @@ spec:
             memory: "1Gi"
             cpu: "500m"
       volumes:
+      # Link the container volume to the PersistentVolumeClaim defined above.
       - name: mongo-storage
         persistentVolumeClaim:
           claimName: mongodb-pvc

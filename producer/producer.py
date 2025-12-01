@@ -3,18 +3,19 @@ import json
 import pandas as pd
 from kafka import KafkaProducer
 
-# Configuration
-KAFKA_BROKER = 'kafka:9092'
-TOPIC = 'store-sales'
-DATA_FILE = '/app/dataset/train.csv'
+# Configuration variables for the Kafka Producer.
+KAFKA_BROKER = 'kafka:9092'  # Internal Kubernetes service name for the Kafka broker.
+TOPIC = 'store-sales'        # The target topic for data streaming.
+DATA_FILE = '/app/dataset/train.csv' # Path to the raw input dataset within the container.
 
 def json_serializer(data):
+    # Function to serialize Python dictionary data into a UTF-8 encoded JSON payload.
     return json.dumps(data).encode('utf-8')
 
 def main():
     print(f"Connecting to Kafka at {KAFKA_BROKER}...")
     producer = None
-    # Retry mechanism for Kafka connection
+    # Implement a 15-attempt retry loop for robust initial Kafka broker connection.
     for i in range(15):
         try:
             producer = KafkaProducer(
@@ -34,34 +35,33 @@ def main():
     print(f"Reading and Shuffling data from {DATA_FILE}...")
     try:
         # 1. READ ALL DATA
-        # We read the CSV into a pandas DataFrame.
-        # Ensure we have enough memory. If file is huge (>2GB), use chunking with random skip.
-        # For this project, we assume it fits in memory.
+        # Load the CSV file into a Pandas DataFrame for in-memory processing.
         df = pd.read_csv(DATA_FILE)
         
         # 2. SHUFFLE DATA (CRITICAL STEP)
-        # frac=1 means return all rows, but in random order.
-        # reset_index drops the old sorted index.
+        # Randomly sample the dataset to simulate asynchronous, real-time transaction arrivals.
         print("Shuffling dataset to simulate random real-time events...")
         df_shuffled = df.sample(frac=1).reset_index(drop=True)
         
         print(f"Starting stream of {len(df_shuffled)} records...")
 
         # 3. STREAM DATA
-        # We iterate through the shuffled dataframe
-        batch_size = 50 # Send in small batches for smoother visualization
+        # Iterate through the shuffled data, processing it in defined batches.
+        batch_size = 50 # Define the size of the micro-batch sent to Kafka.
         
         for i in range(0, len(df_shuffled), batch_size):
             chunk = df_shuffled.iloc[i:i+batch_size]
             
             for index, row in chunk.iterrows():
+                # Convert the DataFrame row to a dictionary and send it as a message.
                 message = row.to_dict()
                 producer.send(TOPIC, message)
             
+            # Explicitly flush the producer to ensure immediate message delivery.
             producer.flush()
             print(f"Sent batch {i} to {i+batch_size}. Sleeping...")
             
-            # Sleep to simulate real-time traffic (adjust as needed)
+            # Introduce a time delay to simulate real-world data latency and flow control.
             time.sleep(1.5) 
             
     except FileNotFoundError:
@@ -69,6 +69,7 @@ def main():
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
+        # Ensure the Kafka producer client connection is properly closed.
         if producer:
             producer.close()
 

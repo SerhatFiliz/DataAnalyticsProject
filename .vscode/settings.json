@@ -1,5 +1,8 @@
 {
+  // IDE CONFIGURATION: Enables static analysis for infrastructure code.
   "yaml.schemas": {
-    "kubernetes://schema/v1%40service": "file:///c%3A/Users/sserh/OneDrive/Masa%C3%BCst%C3%BC/Homework/k8s/kafka.yaml"
+    // SCHEMA BINDING: Maps the local Kafka manifest to the official Kubernetes Service schema.
+    // Ensures syntax validation and auto-completion (IntelliSense) during development.
+    "kubernetes://schema/v1@service": "file:///c%3A/Users/sserh/OneDrive/Masa%C3%BCst%C3%BC/Homework/k8s/kafka.yaml"
   }
 }
