@@ -1,11 +1,3 @@
-# ==============================================================================
-# SCRIPT: deploy.ps1
-# PROJECT: Hybrid Sales Analytics System
-# DESCRIPTION: Automated deployment script for cleaning up existing resources, 
-# building Docker images, and deploying the entire infrastructure 
-# (Kafka, Mongo, Spark, Dashboard) to Kubernetes.
-# ==============================================================================
-
 Write-Host ">>> STARTING BIG DATA ANALYTICS PROJECT DEPLOYMENT <<<" -ForegroundColor Green
 
 # 1. Clean Up Previous Deployment (Clean Slate)
@@ -26,6 +18,10 @@ Write-Host "3/5 Deploying Core Infrastructure (Kafka, Mongo, Dashboard)..." -For
 kubectl apply -f k8s/zookeeper.yaml
 kubectl apply -f k8s/kafka.yaml
 kubectl apply -f k8s/mongodb.yaml
+# --- MONITORING UI SERVICES ---
+kubectl apply -f k8s/mongo-express.yaml
+kubectl apply -f k8s/kafdrop.yaml
+# ------------------------------
 kubectl apply -f k8s/spark-rbac.yaml
 kubectl apply -f k8s/dashboard.yaml
 
@@ -36,6 +32,8 @@ Start-Sleep -Seconds 45
 Write-Host "4/5 Starting Consumers (Raw Data & Spark ML Job)..." -ForegroundColor Cyan
 kubectl apply -f k8s/raw-consumer.yaml
 kubectl apply -f k8s/spark-job.yaml
+# --- SPARK UI SERVICE ---
+kubectl apply -f k8s/spark-ui.yaml
 
 Write-Host "Waiting 20 seconds for the Spark Job to allocate resources and start processing..." -ForegroundColor Magenta
 Start-Sleep -Seconds 20
@@ -46,8 +44,11 @@ kubectl apply -f k8s/producer-job.yaml
 
 Write-Host "------------------------------------------------" -ForegroundColor Green
 Write-Host "DEPLOYMENT COMPLETE!" -ForegroundColor Green
-Write-Host "Access the Dashboard at:" -ForegroundColor White
-Write-Host "http://localhost:30005" -ForegroundColor Yellow
+Write-Host "Access the Dashboards at:" -ForegroundColor White
+Write-Host "1. http://localhost:30005 (Streamlit Dashboard)" -ForegroundColor Yellow
+Write-Host "2. http://localhost:30006 (MongoDB Web UI - User: user, Pass: password)" -ForegroundColor Yellow
+Write-Host "3. http://localhost:30007 (Kafka Web UI)" -ForegroundColor Yellow
+Write-Host "4. http://localhost:30040 (Spark Web UI)" -ForegroundColor Yellow
 Write-Host "------------------------------------------------" -ForegroundColor Green
 
 # ==============================================================================
@@ -61,7 +62,8 @@ function Stop-Project {
     kubectl delete job spark-job producer-job --ignore-not-found=true
 
     # 2. Scale down all core services to zero replicas.
-    kubectl scale deployment --replicas=0 dashboard kafka zookeeper mongodb raw-consumer
+    # Note: Mongo Express and Kafdrop are also scaled down to save resources.
+    kubectl scale deployment --replicas=0 dashboard kafka zookeeper mongodb raw-consumer mongo-express kafdrop
 
     Write-Host "✅ Project successfully paused. Resource usage is now zero." -ForegroundColor Green
 }
@@ -70,7 +72,7 @@ function Start-Project {
     Write-Host "▶️ Scaling Deployments back to one replica (Resuming services)..." -ForegroundColor Yellow
     
     # 1. Scale up all core services to one replica.
-    kubectl scale deployment --replicas=1 dashboard kafka zookeeper mongodb raw-consumer
+    kubectl scale deployment --replicas=1 dashboard kafka zookeeper mongodb raw-consumer mongo-express kafdrop
 
     Write-Host "⏳ Waiting 30 seconds for the necessary services (Kafka, Mongo) to initialize..." -ForegroundColor Magenta
     Start-Sleep -Seconds 30

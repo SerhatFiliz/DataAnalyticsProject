@@ -5,6 +5,9 @@ metadata:
 spec:
   # Define the job template for the Spark Driver pod.
   template:
+    metadata:
+      labels:
+        app: spark-driver
     spec:
       # Use the 'spark' service account for necessary cluster permissions (RBAC).
       serviceAccountName: spark
